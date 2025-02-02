@@ -8,14 +8,15 @@
 #SBATCH --partition=eaton-compute
 #SBATCH --qos=ee-med
 
-source /home/quanpham/compositional-rl-synth-data/first_3.9.6/bin/activate
+source /home/quanpham/first_3.9.6/bin/activate
 
 python /home/quanpham/compositional-rl-synth-data/scripts/train_conditional_diffusion.py \
-    --base_data_path /mnt/kostas-graid/datasets/quanpham \
-    --base_results_folder /mnt/kostas-graid/datasets/quanpham/results/diffusion \
+    --base_data_path /mnt/kostas-graid/datasets/quanpham/dev \
+    --base_results_folder /mnt/kostas-graid/datasets/quanpham/dev/results/diffusion \
     --gin_config_files /home/quanpham/compositional-rl-synth-data/config/diffusion.gin \
     --dataset_type expert \
-    --experiment_type default \
-    --num_train 208 \
+    --experiment_type smallscale \
+    --element IIWA \
+    --num_train 2 \
     --seed 42
     

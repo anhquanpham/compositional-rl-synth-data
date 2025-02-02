@@ -31,7 +31,7 @@ if __name__ == '__main__':
 
     # W&B config
     parser.add_argument('--wandb_project', type=str, default="offline_rl_diffusion")
-    parser.add_argument('--wandb_entity', type=str, default="")
+    #parser.add_argument('--wandb_entity', type=str, default="")
     parser.add_argument('--wandb_group', type=str, default="diffusion_training")
     args = parser.parse_args()
 
@@ -107,7 +107,7 @@ if __name__ == '__main__':
 
     wandb.init(
         project=args.wandb_project,
-        entity=args.wandb_entity,
+        #entity=args.wandb_entity,
         group=args.wandb_group,
         name=results_folder.name,
     )

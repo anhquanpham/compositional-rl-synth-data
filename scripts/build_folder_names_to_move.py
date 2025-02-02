@@ -2,7 +2,7 @@ import os
 import pickle
 
 run_name = 'cond_diff_24'
-base_folder = '/mnt/kostas-graid/datasets/spatank/results/diffusion/'
+base_folder = '/mnt/kostas-graid/datasets/quanpham/results/diffusion/'
 run_folder = os.path.join(base_folder, run_name)
 
 train_task_file = os.path.join(run_folder, 'train_tasks.pkl')
