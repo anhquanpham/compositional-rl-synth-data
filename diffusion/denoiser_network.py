@@ -522,6 +522,21 @@ class ResidualBlock(nn.Module):
             encoder_kwargs=encoder_kwargs,
             observation_shape=observation_shape,
         )  # Initialize once in __init__
+        # Residual transformation MLP: 164 -> 512 -> 512 -> 164
+        """
+        self.residual_transform = nn.Sequential(
+            nn.Linear(164, 256),
+            nn.ReLU(),
+            nn.Linear(256, 512),
+            nn.ReLU(),
+            nn.Linear(512, 164),
+        )
+        """
+        
+        # LayerNorm and activation, similar to OLDResidualBlock
+        self.ln = nn.LayerNorm(164) if layer_norm else nn.Identity()
+        self.activation = nn.ReLU()
+        self.linear = nn.Linear(164, 164)  # Final transformation before residual connection
 
     def forward(self, x):
         # Extract batch components
@@ -546,17 +561,25 @@ class ResidualBlock(nn.Module):
 
         # Concatenate all components into learned_residual
         learned_residual = torch.cat(
-            [current_state_embedding, action, reward, next_state_embedding, terminal_flag, onehot], dim=-1
+            [current_state_embedding, action, reward, next_state_embedding, terminal_flag], dim=-1
         )
         
+        # Pass learned_residual through the MLP (only first 164 components)
+        #transformed_residual = self.residual_transform(learned_residual)
+        
+        # Apply LayerNorm + Activation + Final Linear (like OLDResidualBlock)
+        transformed_residual = self.linear(self.activation(self.ln(learned_residual)))
+        
+        print(transformed_residual.shape) #THIS STEP IM THINKING OF FEEDING IT BACK LIKE THE RESIDUAL BLOCK
+        
         # Perform x + learned_residual for the first 164 components
-        first_164_add = x[:, :164] + learned_residual[:, :164]
+        first_164_add = x[:, :164] + transformed_residual
 
         # Concatenate with the unchanged onehot part
         return torch.cat([first_164_add, onehot], dim=-1)
 
 
-class ResidualMLP(nn.Module):
+class Ver1_ResidualMLP(nn.Module):
     def __init__(self, encoder_kwargs, observation_shape, depth: int):
         super().__init__()
 
@@ -571,6 +594,29 @@ class ResidualMLP(nn.Module):
         output = self.network(x)  # Pass structured input through the sequence
         print("Output shape:", output.shape)
         return output[:, :164]
+
+class ResidualMLP(nn.Module):
+    def __init__(self, encoder_kwargs, observation_shape, depth: int, activation: str = "relu", layer_norm: bool = False):
+        super().__init__()
+
+        self.network = nn.Sequential(
+            *[ResidualBlock(encoder_kwargs, observation_shape) for _ in range(depth)]
+        )
+
+        # Optional LayerNorm and activation before final output
+        self.layer_norm = nn.LayerNorm(164) if layer_norm else nn.Identity()
+        self.activation = getattr(F, activation)
+
+        print("ResidualMLP initialized")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        print("In Residual MLP, input shape:", x.shape)
+
+        output = self.network(x)  # Pass structured input through the sequence
+        output = self.activation(self.layer_norm(output[:, :164]))  # Apply LayerNorm and non-linearity
+
+        print("Output shape:", output.shape)
+        return output
 
 #####################################################################################NEW RESIDUAL BLOCK###############################
 # Residual MLP of the form x_{L+1} = MLP(LN(x_L)) + x_L
@@ -690,7 +736,7 @@ class ResidualMLPDenoiser(nn.Module):
             assert cond is not None
             print("COND VECTOR", cond.shape)
             print("COND VECTOR 0", cond[0])
-            x = torch.cat((x, cond), dim=-1) 
+            x = torch.cat((x, cond), dim=-1) #180
         print("x shape after cat cond: ", x.shape)
         print("OUTPUT DIM AT MAIN NETWORK ", self.residual_mlp(x).shape)
-        return self.residual_mlp(x)
+        return self.residual_mlp(x) #164
