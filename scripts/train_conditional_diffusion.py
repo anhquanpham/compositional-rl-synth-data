@@ -115,7 +115,7 @@ if __name__ == '__main__':
     # Trainer
     trainer = Trainer(diffusion, dataset, results_folder=str(results_folder))
     trainer.train()
-
+    """
     for robot, obj, obst, subtask in test_tasks:
         print('Generating synthetic data for test tasks:', robot, obj, obst, subtask)
         subtask_folder = results_folder / f"{robot}_{obj}_{obst}_{subtask}"
@@ -145,7 +145,7 @@ if __name__ == '__main__':
             next_observations=next_obs,
             terminals=terminals
         )
-
+    
     for idx, (robot, obj, obst, subtask) in enumerate(train_tasks):
         print('Generating synthetic data for train tasks:', robot, obj, obst, subtask)
         subtask_folder = results_folder / f"{robot}_{obj}_{obst}_{subtask}"
@@ -175,3 +175,4 @@ if __name__ == '__main__':
             next_observations=next_obs,
             terminals=terminals
         )
+"""

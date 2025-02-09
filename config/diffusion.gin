@@ -12,7 +12,7 @@ construct_diffusion_model.denoising_network = @ResidualMLPDenoiser
 construct_diffusion_model.disable_terminal_norm = True
 
 # Network.
-ResidualMLPDenoiser.dim_t = 128
+ResidualMLPDenoiser.dim_t = 164# CHANGED FROM 128 TO 164
 ResidualMLPDenoiser.mlp_width = 2048
 ResidualMLPDenoiser.num_layers = 6
 ResidualMLPDenoiser.learned_sinusoidal_cond = False
@@ -35,5 +35,5 @@ Trainer.small_batch_size = 256
 Trainer.train_lr = 3e-4
 Trainer.lr_scheduler = 'cosine_restarts'
 Trainer.weight_decay = 0
-Trainer.train_num_steps = 100000
-Trainer.save_and_sample_every = 100000
+Trainer.train_num_steps = 10 #remember to fix into 100000 before pushing
+Trainer.save_and_sample_every = 10 #remember to fix into 100000 before pushing
