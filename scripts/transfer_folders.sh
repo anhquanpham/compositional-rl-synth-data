@@ -1,8 +1,8 @@
 #!/bin/bash
 
 remote_host="quanpham@grasp-login2.seas.upenn.edu"
-base_remote_folder="/mnt/kostas-graid/datasets/quanpham/results/diffusion/cond_diff_24"
-local_destination="/Users/anhquanpham/Developer/compositional-rl-synth-data/cluster_results/diffusion/cond_diff_24/test"
+base_remote_folder="/home/quanpham/compositional-rl-synth-data/results/diffusion/cond_diff_1"
+local_destination="/home/anhquanpham/projects/results/cond_diff_1"
 
 mkdir -p "$local_destination"
 

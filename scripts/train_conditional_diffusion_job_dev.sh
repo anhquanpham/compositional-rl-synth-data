@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=diffusion_training
+#SBATCH --job-name=16m-NoK
 #SBATCH --output=slurm/%A_%a_train_conditional_diffusion.out
 #SBATCH --mem=400G
 #SBATCH --gpus=1

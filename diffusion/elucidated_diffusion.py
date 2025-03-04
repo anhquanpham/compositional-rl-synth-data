@@ -119,8 +119,8 @@ class ElucidatedDiffusion(nn.Module):
             cond=cond,
         )
         #print("Cond in elucidated: " cond)
-        print("Tensor A (left): ", (self.c_skip(padded_sigma) * noised_inputs)[0].shape)
-        print("Tensor B (right): ", (self.c_out(padded_sigma) * net_out)[0].shape)
+        #print("Tensor A (left): ", (self.c_skip(padded_sigma) * noised_inputs)[0].shape)
+        #print("Tensor B (right): ", (self.c_out(padded_sigma) * net_out)[0].shape)
 
         out = self.c_skip(padded_sigma) * noised_inputs + self.c_out(padded_sigma) * net_out
 

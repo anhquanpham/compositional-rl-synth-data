@@ -51,7 +51,7 @@ if __name__ == '__main__':
 
     if args.experiment_type == 'default':
         train_tasks, test_tasks = composuite.sample_tasks(experiment_type='default', num_train=args.num_train)
-        test_tasks = test_tasks[:12]
+        test_tasks = test_tasks[:10]
     if args.experiment_type == 'smallscale':
         element = args.element
         train_tasks, test_tasks = composuite.sample_tasks(experiment_type='smallscale', 
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     # Trainer
     trainer = Trainer(diffusion, dataset, results_folder=str(results_folder))
     trainer.train()
-    """
+
     for robot, obj, obst, subtask in test_tasks:
         print('Generating synthetic data for test tasks:', robot, obj, obst, subtask)
         subtask_folder = results_folder / f"{robot}_{obj}_{obst}_{subtask}"
@@ -146,7 +146,7 @@ if __name__ == '__main__':
             terminals=terminals
         )
     
-    for idx, (robot, obj, obst, subtask) in enumerate(train_tasks):
+    for idx, (robot, obj, obst, subtask) in enumerate(train_tasks[:10]):
         print('Generating synthetic data for train tasks:', robot, obj, obst, subtask)
         subtask_folder = results_folder / f"{robot}_{obj}_{obst}_{subtask}"
         retry_count = 0
@@ -175,4 +175,3 @@ if __name__ == '__main__':
             next_observations=next_obs,
             terminals=terminals
         )
-"""
