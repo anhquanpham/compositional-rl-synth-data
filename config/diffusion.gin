@@ -7,19 +7,22 @@ split_diffusion_samples.modelled_terminals = %modelled_terminals
 split_diffusion_samples.terminal_threshold = 0.5
 
 construct_diffusion_model.normalizer_type = 'standard'
-construct_diffusion_model.denoising_network = @ResidualMLPDenoiser
 # No normalization on the terminals.
 construct_diffusion_model.disable_terminal_norm = True
 
 # Network.
-ResidualMLPDenoiser.dim_t = 164# CHANGED FROM 128 TO 164
-ResidualMLPDenoiser.mlp_width = 2048
-ResidualMLPDenoiser.num_layers = 6
+ResidualMLPDenoiser.dim_t = 128
+ResidualMLPDenoiser.mlp_width = 3072
+ResidualMLPDenoiser.num_layers = 3
 ResidualMLPDenoiser.learned_sinusoidal_cond = False
 ResidualMLPDenoiser.random_fourier_features = True
 ResidualMLPDenoiser.learned_sinusoidal_dim = 16
 ResidualMLPDenoiser.activation = 'relu'
 ResidualMLPDenoiser.layer_norm = False
+
+# Compositional Network.
+CompositionalResidualMLPDenoiser.dim_t = 164
+CompositionalResidualMLPDenoiser.projection_factor = 16
 
 # Diffusion Model.
 ElucidatedDiffusion.num_sample_steps = 128
@@ -32,8 +35,8 @@ ElucidatedDiffusion.S_noise = 1.003
 # Training.
 Trainer.train_batch_size = 1024
 Trainer.small_batch_size = 256
-Trainer.train_lr = 3e-4 #original was 3e-4
+Trainer.train_lr = 3e-4
 Trainer.lr_scheduler = 'cosine_restarts'
 Trainer.weight_decay = 0
-Trainer.train_num_steps = 100000 #remember to fix into 100000 before pushing
-Trainer.save_and_sample_every = 100000 #remember to fix into 100000 before pushing
+Trainer.train_num_steps = 100000
+Trainer.save_and_sample_every = 100000

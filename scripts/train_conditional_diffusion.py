@@ -20,6 +20,8 @@ if __name__ == '__main__':
     parser.add_argument('--gin_config_files', nargs='*', type=str, default=['config/diffusion.gin'])
     parser.add_argument('--gin_params', nargs='*', type=str, default=[], help='Additional gin parameters.')
 
+    parser.add_argument('--compositional', type=str, default='False', help='Use compositional denoiser network.')
+
     # Environment
     parser.add_argument('--dataset_type', type=str, required=True, help='Dataset type (e.g., expert data).')
     parser.add_argument('--experiment_type', type=str, required=True, help='CompoSuite experiment type.', default='default')
@@ -31,7 +33,7 @@ if __name__ == '__main__':
 
     # W&B config
     parser.add_argument('--wandb_project', type=str, default="offline_rl_diffusion")
-    #parser.add_argument('--wandb_entity', type=str, default="")
+    parser.add_argument('--wandb_entity', type=str, default="")
     parser.add_argument('--wandb_group', type=str, default="diffusion_training")
     args = parser.parse_args()
 
@@ -39,9 +41,9 @@ if __name__ == '__main__':
 
     base_results_path = pathlib.Path(args.base_results_folder)
     idx = 1
-    while (base_results_path / f"cond_diff_{idx}").exists():
+    while (base_results_path / f"comp_diff_{idx}").exists():
         idx += 1
-    results_folder = base_results_path / f"cond_diff_{idx}"
+    results_folder = base_results_path / f"comp_diff_{idx}"
     results_folder.mkdir(parents=True, exist_ok=True)
 
     np.random.seed(args.seed)
@@ -51,14 +53,15 @@ if __name__ == '__main__':
 
     if args.experiment_type == 'default':
         train_tasks, test_tasks = composuite.sample_tasks(experiment_type='default', num_train=args.num_train)
-        test_tasks = test_tasks[:10]
+        test_tasks = test_tasks[:12]
+        #train_tasks = [('IIWA', 'Box', 'GoalWall', 'PickPlace')]
     if args.experiment_type == 'smallscale':
         element = args.element
         train_tasks, test_tasks = composuite.sample_tasks(experiment_type='smallscale', 
-                                                 smallscale_elem=args.element, num_train=args.num_train)
+                                                          smallscale_elem=args.element, num_train=args.num_train)
     if args.experiment_type == 'holdout':
         train_tasks, test_tasks = composuite.sample_tasks(experiment_type='holdout', 
-                                                 holdout_elem=args.element, num_train=args.num_train)
+                                                          holdout_elem=args.element, num_train=args.num_train)
         
     with open(results_folder / "train_tasks.pkl", 'wb') as file:
         pickle.dump(train_tasks, file)
@@ -103,11 +106,12 @@ if __name__ == '__main__':
     indicators = torch.from_numpy(all_indicators_matrix).float()
     dataset = torch.utils.data.TensorDataset(inputs, indicators)
 
-    diffusion = construct_diffusion_model(inputs=inputs, cond_dim=indicators.shape[1])
+    compositional = args.compositional == 'True'
+    diffusion = construct_diffusion_model(inputs=inputs, compositional=compositional, cond_dim=indicators.shape[1])
 
     wandb.init(
         project=args.wandb_project,
-        #entity=args.wandb_entity,
+        entity=args.wandb_entity,
         group=args.wandb_group,
         name=results_folder.name,
     )
@@ -145,8 +149,8 @@ if __name__ == '__main__':
             next_observations=next_obs,
             terminals=terminals
         )
-    
-    for idx, (robot, obj, obst, subtask) in enumerate(train_tasks[:10]):
+
+    for idx, (robot, obj, obst, subtask) in enumerate(train_tasks[:12]):
         print('Generating synthetic data for train tasks:', robot, obj, obst, subtask)
         subtask_folder = results_folder / f"{robot}_{obj}_{obst}_{subtask}"
         retry_count = 0

@@ -17,7 +17,7 @@ import torch
 from torch import nn
 
 # GIN-required imports.
-from diffusion.denoiser_network import ResidualMLPDenoiser
+from diffusion.denoiser_network import ResidualMLPDenoiser, CompositionalResidualMLPDenoiser
 from diffusion.elucidated_diffusion import ElucidatedDiffusion
 from diffusion.norm import normalizer_factory, MinMaxNormalizer
 
@@ -201,13 +201,17 @@ def split_diffusion_samples(
 def construct_diffusion_model(
         inputs: torch.Tensor,
         normalizer_type: str,
-        denoising_network: nn.Module,
+        compositional: bool = False,
         disable_terminal_norm: bool = False,
         skip_dims: List[int] = [],
         cond_dim: Optional[int] = None,
 ) -> ElucidatedDiffusion:
     event_dim = inputs.shape[1]
-    model = denoising_network(d_in=event_dim, cond_dim=cond_dim)
+
+    if compositional:
+        model = CompositionalResidualMLPDenoiser(d_in=event_dim, cond_dim=cond_dim)
+    else:
+        model = ResidualMLPDenoiser(d_in=event_dim, cond_dim=cond_dim)
 
     if disable_terminal_norm:
         terminal_dim = event_dim - 1

@@ -23,7 +23,6 @@ from tqdm import tqdm
 
 from diffusion.norm import BaseNormalizer
 
-
 # helpers
 def exists(val):
     return val is not None
@@ -118,9 +117,6 @@ class ElucidatedDiffusion(nn.Module):
             self.c_noise(sigma),
             cond=cond,
         )
-        #print("Cond in elucidated: " cond)
-        #print("Tensor A (left): ", (self.c_skip(padded_sigma) * noised_inputs)[0].shape)
-        #print("Tensor B (right): ", (self.c_out(padded_sigma) * net_out)[0].shape)
 
         out = self.c_skip(padded_sigma) * noised_inputs + self.c_out(padded_sigma) * net_out
 
@@ -290,7 +286,7 @@ class Trainer(object):
         super().__init__()
         self.accelerator = Accelerator(
             split_batches=split_batches,
-            mixed_precision='fp16' if fp16 else 'no'
+            mixed_precision='fp16' if fp16 else 'no',
         )
         self.accelerator.native_amp = amp
         self.model = diffusion_model
