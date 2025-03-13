@@ -763,14 +763,14 @@ class CompositionalResidualMLP(nn.Module):
 
 
         #EACH LAYER NORM
-        # self.layer_norm = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.object_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.obstacle_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.goal_layer_norm = nn.LayerNorm(17 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.proprio_layer_norm = nn.LayerNorm(32 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.action_layer_norm = nn.LayerNorm(8 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.reward_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
-        # self.terminal_flag_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
+        self.layer_norm = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
+        self.object_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
+        self.obstacle_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
+        self.goal_layer_norm = nn.LayerNorm(17 * self.projection_factor) if layer_norm else nn.Identity()
+        self.proprio_layer_norm = nn.LayerNorm(32 * self.projection_factor) if layer_norm else nn.Identity()
+        self.action_layer_norm = nn.LayerNorm(8 * self.projection_factor) if layer_norm else nn.Identity()
+        self.reward_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
+        self.terminal_flag_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
 
         #         #PRoject back to original size
         self.final_proj_object = nn.Linear(14 * self.projection_factor, 14)
@@ -824,39 +824,39 @@ class CompositionalResidualMLP(nn.Module):
 
         #PROJECT OUTPUT BACK
 
-        # output_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, :self.projection_factor * 14])))
-        # output_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])))
-        # output_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])))
-        # output_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])))
+        output_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, :self.projection_factor * 14])))
+        output_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])))
+        output_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])))
+        output_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])))
 
 
-        # output_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])))
-        # output_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])))
+        output_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])))
+        output_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])))
 
 
-        # output_next_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])))
-        # output_next_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])))
-        # output_next_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])))
-        # output_next_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])))
+        output_next_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])))
+        output_next_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])))
+        output_next_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])))
+        output_next_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])))
 
-        # output_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])))
+        output_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])))
 
-        output_state_object = self.final_proj_object(repeated_residual_output[:, :self.projection_factor * 14])
-        output_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])
-        output_state_goal = self.final_proj_goal(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])
-        output_state_proprio = self.final_proj_proprio(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])
-
-
-        output_action = self.final_proj_action(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])
-        output_reward = self.final_proj_reward(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])
+        # output_state_object = self.final_proj_object(repeated_residual_output[:, :self.projection_factor * 14])
+        # output_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])
+        # output_state_goal = self.final_proj_goal(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])
+        # output_state_proprio = self.final_proj_proprio(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])
 
 
-        output_next_state_object = self.final_proj_object(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])
-        output_next_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])
-        output_next_state_goal = self.final_proj_goal(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])
-        output_next_state_proprio = self.final_proj_proprio(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])
+        # output_action = self.final_proj_action(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])
+        # output_reward = self.final_proj_reward(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])
 
-        output_terminal_flag = self.final_proj_terminal_flag(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])
+
+        # output_next_state_object = self.final_proj_object(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])
+        # output_next_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])
+        # output_next_state_goal = self.final_proj_goal(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])
+        # output_next_state_proprio = self.final_proj_proprio(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])
+
+        # output_terminal_flag = self.final_proj_terminal_flag(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])
 
         output_state = torch.cat([output_state_object, output_state_obstacle, output_state_goal, output_state_proprio], dim = -1)
         output_next_state = torch.cat([output_next_state_object, output_next_state_obstacle, output_next_state_goal, output_next_state_proprio], dim = -1)
