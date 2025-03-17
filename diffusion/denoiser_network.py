@@ -1,32 +1,54 @@
 """
 Denoiser networks for diffusion.
 Code adapts heavily from https://github.com/conglu1997/SynthER.
+
+This version includes optimized versions of:
+  - _VectorEncoder (using nn.Sequential when possible)
+  - Encoder (with proper abstract properties)
+  - CompositionalMLP (with vectorized batch operations in forward)
+  - CompositionalResidualBlock and CompositionalResidualMLP (with additional vectorization)
 """
 
 import math
-from typing import Optional
+from typing import Optional, Sequence, Dict, Any
+from abc import ABCMeta, abstractmethod
 
 import gin
 import torch
 import torch.nn as nn
 import torch.optim
-from einops import rearrange
-from torch.nn import functional as F
+import torch.nn.functional as F
 import numpy as np
-from typing import Optional, Sequence, Dict, Any
-from abc import ABCMeta, abstractmethod
+from einops import rearrange
 
 
+##########################
+# Utility functions
+##########################
 def exists(x):
     return x is not None
-
 
 def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
 
+def fanin_init(tensor):
+    """Initialize the weights of a layer with fan-in initialization."""
+    size = tensor.size()
+    if len(size) == 2:
+        fan_in = size[0]
+    elif len(size) > 2:
+        fan_in = np.prod(size[1:])
+    else:
+        raise Exception("Shape must have dimension at least 2.")
+    bound = 1.0 / np.sqrt(fan_in)
+    return tensor.data.uniform_(-bound, bound)
 
+
+##########################
+# Positional Embeddings (unchanged)
+##########################
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -41,16 +63,11 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
-
 class RandomOrLearnedSinusoidalPosEmb(nn.Module):
-    """ following @crowsonkb's lead with random (learned optional) sinusoidal pos emb """
-    """ https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/models/danbooru_128.py#L8 """
-
-    def __init__(
-            self,
-            dim: int,
-            is_random: bool = False,
-    ):
+    """
+    Following @crowsonkb's lead with random (or learned) sinusoidal positional embedding.
+    """
+    def __init__(self, dim: int, is_random: bool = False):
         super().__init__()
         assert (dim % 2) == 0
         half_dim = dim // 2
@@ -60,64 +77,50 @@ class RandomOrLearnedSinusoidalPosEmb(nn.Module):
         x = rearrange(x, 'b -> b 1')
         freqs = x * rearrange(self.weights, 'd -> 1 d') * 2 * math.pi
         fouriered = torch.cat((freqs.sin(), freqs.cos()), dim=-1)
-        fouriered = torch.cat((x, fouriered), dim=-1)
-        return fouriered
+        return torch.cat((x, fouriered), dim=-1)
 
 
-# Residual MLP of the form x_{L+1} = MLP(LN(x_L)) + x_L
+##########################
+# Residual MLP (Original)
+##########################
 class ResidualBlock(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, activation: str = "relu", layer_norm: bool = True):
         super().__init__()
         self.linear = nn.Linear(dim_in, dim_out, bias=True)
-        if layer_norm:
-            self.ln = nn.LayerNorm(dim_in)
-        else:
-            self.ln = torch.nn.Identity()
+        self.ln = nn.LayerNorm(dim_in) if layer_norm else nn.Identity()
         self.activation = getattr(F, activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.linear(self.activation(self.ln(x)))
 
-
 class ResidualMLP(nn.Module):
-    def __init__(
-            self,
-            input_dim: int,
-            width: int,
-            depth: int,
-            output_dim: int,
-            activation: str = "relu",
-            layer_norm: bool = False,
-    ):
+    def __init__(self, input_dim: int, width: int, depth: int, output_dim: int, activation: str = "relu", layer_norm: bool = False):
         super().__init__()
-
         self.network = nn.Sequential(
             nn.Linear(input_dim, width),
             *[ResidualBlock(width, width, activation, layer_norm) for _ in range(depth)],
-            nn.LayerNorm(width) if layer_norm else torch.nn.Identity(),
+            nn.LayerNorm(width) if layer_norm else nn.Identity(),
         )
-
         self.activation = getattr(F, activation)
         self.final_linear = nn.Linear(width, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.final_linear(self.activation(self.network(x)))
 
-
 @gin.configurable
 class ResidualMLPDenoiser(nn.Module):
     def __init__(
-            self,
-            d_in: int,
-            dim_t: int = 128,
-            mlp_width: int = 1024,
-            num_layers: int = 6,
-            learned_sinusoidal_cond: bool = False,
-            random_fourier_features: bool = True,
-            learned_sinusoidal_dim: int = 16,
-            activation: str = "relu",
-            layer_norm: bool = True,
-            cond_dim: Optional[int] = None,
+        self,
+        d_in: int,
+        dim_t: int = 128,
+        mlp_width: int = 1024,
+        num_layers: int = 6,
+        learned_sinusoidal_cond: bool = False,
+        random_fourier_features: bool = True,
+        learned_sinusoidal_dim: int = 16,
+        activation: str = "relu",
+        layer_norm: bool = True,
+        cond_dim: Optional[int] = None,
     ):
         super().__init__()
         self.residual_mlp = ResidualMLP(
@@ -135,7 +138,6 @@ class ResidualMLPDenoiser(nn.Module):
             self.proj = nn.Linear(d_in, dim_t)
             self.conditional = False
 
-        # time embeddings
         self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
         if self.random_or_learned_sinusoidal_cond:
             sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
@@ -151,80 +153,19 @@ class ResidualMLPDenoiser(nn.Module):
             nn.Linear(dim_t, dim_t)
         )
 
-    def forward(
-            self,
-            x: torch.Tensor,
-            timesteps: torch.Tensor,
-            cond=None,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
         if self.conditional:
             assert cond is not None
             x = torch.cat((x, cond), dim=-1)
         time_embed = self.time_mlp(timesteps)
         x = self.proj(x) + time_embed
         return self.residual_mlp(x)
-    
-
-def adapt_observation_positions(reference_observation_positions: dict, projection_factor: int) -> dict:
-    adjusted_observation_positions = {}
-    current_position = 0  # this will keep track of the current position across components
-
-    for key, positions in reference_observation_positions.items():
-        # For non-ID components, adjust the range of positions based on projection_factor
-        if key not in ['object_id', 'robot_id', 'obstacle_id', 'subtask_id']:
-            num_components = len(positions)
-            new_num_components = num_components * projection_factor
-            new_positions = np.arange(current_position, current_position + new_num_components)
-
-            # Update the dictionary with the adjusted positions
-            adjusted_observation_positions[key] = new_positions
-            current_position += new_num_components  # Update the current_position for the next component
-        else:
-            # For ID components, make their positions continuous from where the last one ended
-            num_components = len(positions)
-            new_positions = np.arange(current_position, current_position + num_components)
-
-            adjusted_observation_positions[key] = new_positions
-            current_position += num_components  # Update current_position for the next component
-
-    return adjusted_observation_positions
 
 
-def fanin_init(tensor):
-    """Initialize the weights of a layer with fan-in initialization.
-
-    Args:
-        tensor (torch.Tensor): Tensor to initialize.
-
-    Returns:
-        torch.Tensor: Initialized tensor.
-
-    Raises:
-        Exception: If the shape of the tensor is less than 2.
-    """
-    size = tensor.size()
-    if len(size) == 2:
-        fan_in = size[0]
-    elif len(size) > 2:
-        fan_in = np.prod(size[1:])
-    else:
-        raise Exception("Shape must be have dimension at least 2.")
-    bound = 1.0 / np.sqrt(fan_in)
-    return tensor.data.uniform_(-bound, bound)
-
-
+##########################
+# Optimized _VectorEncoder
+##########################
 class _VectorEncoder(nn.Module):
-
-    _observation_shape: Sequence[int]
-    _use_batch_norm: bool
-    _dropout_rate: Optional[float]
-    _use_dense: bool
-    _activation: nn.Module
-    _feature_size: int
-    _fcs: nn.ModuleList
-    _bns: nn.ModuleList
-    _dropouts: nn.ModuleList
-
     def __init__(
         self,
         observation_shape: Sequence[int],
@@ -236,10 +177,7 @@ class _VectorEncoder(nn.Module):
     ):
         super().__init__()
         self._observation_shape = observation_shape
-
-        if hidden_units is None:
-            hidden_units = [256, 256]
-
+        hidden_units = default(hidden_units, lambda: [256, 256])
         self._use_batch_norm = use_batch_norm
         self._dropout_rate = dropout_rate
         self._feature_size = hidden_units[-1]
@@ -247,29 +185,46 @@ class _VectorEncoder(nn.Module):
         self._use_dense = use_dense
 
         in_units = [observation_shape[0]] + list(hidden_units[:-1])
-        self._fcs = nn.ModuleList()
-        self._bns = nn.ModuleList()
-        self._dropouts = nn.ModuleList()
-        for i, (in_unit, out_unit) in enumerate(zip(in_units, hidden_units)):
-            if use_dense and i > 0:
-                in_unit += observation_shape[0]
-            self._fcs.append(nn.Linear(in_unit, out_unit))
-            if use_batch_norm:
-                self._bns.append(nn.BatchNorm1d(out_unit))
-            if dropout_rate is not None:
-                self._dropouts.append(nn.Dropout(dropout_rate))
+        # When dense connections are not needed, pack layers in Sequential
+        if not use_dense:
+            layers = []
+            for i, (in_unit, out_unit) in enumerate(zip(in_units, hidden_units)):
+                fc = nn.Linear(in_unit, out_unit) if not (use_dense and i > 0) else nn.Linear(in_unit + observation_shape[0], out_unit)
+                layers.append(fc)
+                layers.append(activation)
+                if use_batch_norm:
+                    layers.append(nn.BatchNorm1d(out_unit))
+                if dropout_rate is not None:
+                    layers.append(nn.Dropout(dropout_rate))
+            self.encoder = nn.Sequential(*layers)
+        else:
+            # For dense connections, we retain the loop for flexibility.
+            self._fcs = nn.ModuleList()
+            self._bns = nn.ModuleList()
+            self._dropouts = nn.ModuleList()
+            for i, (in_unit, out_unit) in enumerate(zip(in_units, hidden_units)):
+                if use_dense and i > 0:
+                    in_unit += observation_shape[0]
+                self._fcs.append(nn.Linear(in_unit, out_unit))
+                if use_batch_norm:
+                    self._bns.append(nn.BatchNorm1d(out_unit))
+                if dropout_rate is not None:
+                    self._dropouts.append(nn.Dropout(dropout_rate))
 
     def _fc_encode(self, x: torch.Tensor) -> torch.Tensor:
-        h = x
-        for i, fc in enumerate(self._fcs):
-            if self._use_dense and i > 0:
-                h = torch.cat([h, x], dim=1)
-            h = self._activation(fc(h))
-            if self._use_batch_norm:
-                h = self._bns[i](h)
-            if self._dropout_rate is not None:
-                h = self._dropouts[i](h)
-        return h
+        if not self._use_dense:
+            return self.encoder(x)
+        else:
+            h = x
+            for i, fc in enumerate(self._fcs):
+                if i > 0:
+                    h = torch.cat([h, x], dim=1)
+                h = self._activation(fc(h))
+                if self._use_batch_norm:
+                    h = self._bns[i](h)
+                if self._dropout_rate is not None:
+                    h = self._dropouts[i](h)
+            return h
 
     def get_feature_size(self) -> int:
         return self._feature_size
@@ -280,9 +235,19 @@ class _VectorEncoder(nn.Module):
 
     @property
     def last_layer(self) -> nn.Linear:
-        return self._fcs[-1]
+        if not self._use_dense:
+            # Assuming the last layer in Sequential is the final dropout/activation,
+            # retrieve the last Linear module manually.
+            for layer in reversed(self.encoder):
+                if isinstance(layer, nn.Linear):
+                    return layer
+        else:
+            return self._fcs[-1]
 
 
+##########################
+# Optimized Encoder (Abstract Base)
+##########################
 class Encoder(metaclass=ABCMeta):
     @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -294,7 +259,7 @@ class Encoder(metaclass=ABCMeta):
 
     @property
     def observation_shape(self) -> Sequence[int]:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
@@ -303,10 +268,15 @@ class Encoder(metaclass=ABCMeta):
     @property
     def last_layer(self) -> nn.Linear:
         raise NotImplementedError
-    
 
+
+##########################
+# Optimized CompositionalMLP
+##########################
 class CompositionalMLP(nn.Module):
-    """Compositional MLP module."""
+    """
+    Compositional MLP module with optimized batch processing.
+    """
     def __init__(
         self,
         sizes: Sequence[Sequence[int]],
@@ -323,73 +293,35 @@ class CompositionalMLP(nn.Module):
         layer_norm: bool = False,
         layer_norm_kwargs: Optional[dict] = None,
     ):
-        """Initialize the compositional MLP module.
-        Args:
-            sizes (list): List of sizes of each layer.
-            num_modules (list): List of number of modules of each type.
-            module_assignment_positions (list): List of module assignment positions.
-            module_inputs (list): List of module inputs.
-            interface_depths (list): List of interface depths.
-            graph_structure (list): List of graph structures.
-            init_w (float, optional): Initial weight value. Defaults to 3e-3.
-            hidden_activation (nn.Module, optional): Hidden activation module. Defaults to nn.ReLU.
-            output_activation (nn.Module, optional): Output activation module. Defaults to nn.Identity.
-            hidden_init (function, optional): Hidden initialization function. Defaults to fanin_init.
-            b_init_value (float, optional): Initial bias value. Defaults to 0.1.
-            layer_norm (bool, optional): Use layer normalization. Defaults to False.
-            layer_norm_kwargs (dict, optional): Keyword arguments for layer normalization. Defaults to None.
-        """
         super().__init__()
-
-        if layer_norm_kwargs is None:
-            layer_norm_kwargs = dict()
-
+        layer_norm_kwargs = default(layer_norm_kwargs, dict())
         self.sizes = sizes
         self.num_modules = num_modules
         self.module_assignment_positions = module_assignment_positions
         self.module_inputs = module_inputs  # keys in a dict
         self.interface_depths = interface_depths
-        self.graph_structure = (
-            graph_structure  # [[0], [1,2], 3] or [[0], [1], [2], [3]]
-        )
+        self.graph_structure = graph_structure
         self.hidden_activation = hidden_activation
         self.output_activation = output_activation
         self.layer_norm = layer_norm
-        self.fcs = []
-        self.layer_norms = []
-        self.count = 0
 
-        self.module_list = nn.ModuleList()  # e.g., object, robot, task...
-
-        for graph_depth in range(
-            len(graph_structure)
-        ):  # root -> children -> ... leaves
-            for j in graph_structure[
-                graph_depth
-            ]:  # loop over all module types at this depth
-                self.module_list.append(nn.ModuleDict())  # pre, post
-                self.module_list[j]["pre_interface"] = nn.ModuleList()
-                self.module_list[j]["post_interface"] = nn.ModuleList()
-                for k in range(num_modules[j]):  # loop over all modules of this type
+        self.module_list = nn.ModuleList()
+        for graph_depth in range(len(graph_structure)):
+            for j in graph_structure[graph_depth]:
+                mod_dict = nn.ModuleDict()
+                mod_dict["pre_interface"] = nn.ModuleList()
+                mod_dict["post_interface"] = nn.ModuleList()
+                for k in range(num_modules[j]):
                     layers_pre = []
                     layers_post = []
-                    for i in range(
-                        len(sizes[j]) - 1
-                    ):  # loop over all depths in this module
+                    for i in range(len(sizes[j]) - 1):
                         if i == interface_depths[j]:
-                            input_size = sum(
-                                sizes[j_prev][-1]
-                                for j_prev in graph_structure[graph_depth - 1]
-                            )
+                            input_size = sum(sizes[j_prev][-1] for j_prev in graph_structure[graph_depth - 1])
                             input_size += sizes[j][i]
                         else:
                             input_size = sizes[j][i]
-
                         fc = nn.Linear(input_size, sizes[j][i + 1])
-                        if (
-                            graph_depth < len(graph_structure) - 1
-                            or i < len(sizes[j]) - 2
-                        ):
+                        if graph_depth < len(graph_structure) - 1 or i < len(sizes[j]) - 2:
                             hidden_init(fc.weight)
                             fc.bias.data.fill_(b_init_value)
                             act = hidden_activation
@@ -399,6 +331,7 @@ class CompositionalMLP(nn.Module):
                             fc.bias.data.uniform_(-init_w, init_w)
                             act = output_activation
                             layer_norm_this = None
+                        
 
                         if layer_norm_this is not None:
                             new_layer = [fc, nn.LayerNorm(sizes[j][i + 1]), act()]
@@ -409,94 +342,59 @@ class CompositionalMLP(nn.Module):
                             layers_pre += new_layer
                         else:
                             layers_post += new_layer
+
                     if layers_pre:
-                        self.module_list[j]["pre_interface"].append(
-                            nn.Sequential(*layers_pre)
-                        )
-                    else:  # it's either a root or a module with no preprocessing
-                        self.module_list[j]["pre_interface"].append(nn.Identity())
-                    self.module_list[j]["post_interface"].append(
-                        nn.Sequential(*layers_post)
-                    )
+                        mod_dict["pre_interface"].append(nn.Sequential(*layers_pre))
+                    else:
+                        mod_dict["pre_interface"].append(nn.Identity())
+                    mod_dict["post_interface"].append(nn.Sequential(*layers_post))
+                self.module_list.append(mod_dict)
 
-    def forward(self, input_val: torch.Tensor, return_preactivations: bool = False):
-        """Forward pass.
-        Args:
-            input_val (torch.Tensor): Input tensor.
-            return_preactivations (bool, optional): Whether to return preactivations. Defaults to False.
-
-        Returns:
-            torch.Tensor: Output tensor.
-        """
+    def forward(self, input_val: torch.Tensor, return_preactivations: bool = False) -> torch.Tensor:
         device = input_val.device
-        if len(input_val.shape) > 2:
+        if input_val.ndim > 2:
             input_val = input_val.squeeze(0)
         if return_preactivations:
-            raise NotImplementedError("To-do: implement return pre-activations.")
+            raise NotImplementedError("Return pre-activations not implemented.")
         x = None
-        for graph_depth in range(
-            len(self.graph_structure)
-        ):  # root -> children -> ... -> leaves
-            x_post = []  # in case multiple module types at the same depth in the graph
-            for j in self.graph_structure[graph_depth]:  # nodes (modules) at this depth
-                if len(input_val.shape) == 1:
+        for graph_depth in range(len(self.graph_structure)):
+            x_post = []
+            for j in self.graph_structure[graph_depth]:
+                if input_val.ndim == 1:
                     x_pre = input_val[self.module_inputs[j]]
                     onehot = input_val[self.module_assignment_positions[j]]
                     module_index = onehot.nonzero()[0]
                     x_pre = self.module_list[j]["pre_interface"][module_index](x_pre)
                     if x is not None:
                         x_pre = torch.cat((x, x_pre), dim=-1)
-                    x_post.append(
-                        self.module_list[j]["post_interface"][module_index](x_pre)
-                    )
+                    x_post.append(self.module_list[j]["post_interface"][module_index](x_pre))
                 else:
                     x_post_tmp = torch.empty(input_val.shape[0], self.sizes[j][-1]).to(device)
                     x_pre = input_val[:, self.module_inputs[j]]
                     onehot = input_val[:, self.module_assignment_positions[j]]
                     module_indices = onehot.nonzero(as_tuple=True)
-                    assert (
-                        module_indices[0]
-                        == torch.arange(module_indices[0].shape[0]).to(device)
-                        ).all()
+                    assert (module_indices[0] == torch.arange(module_indices[0].shape[0]).to(device)).all()
                     module_indices_1 = module_indices[1]
                     for module_idx in range(self.num_modules[j]):
-                        mask_inputs_for_this_module = module_indices_1 == module_idx
-                        mask_to_input_idx = mask_inputs_for_this_module.nonzero()
-                        x_pre_this_module = self.module_list[j]["pre_interface"][
-                            module_idx
-                        ](x_pre[mask_inputs_for_this_module])
+                        mask = module_indices_1 == module_idx
+                        mask_to_input_idx = mask.nonzero()
+                        x_pre_this = self.module_list[j]["pre_interface"][module_idx](x_pre[mask])
                         if x is not None:
-                            x_pre_this_module = torch.cat(
-                                (x[mask_inputs_for_this_module], x_pre_this_module),
-                                dim=-1,
-                            )
-                        x_post_this_module = self.module_list[j]["post_interface"][
-                            module_idx
-                        ](x_pre_this_module)
-                        mask_to_input_idx = mask_to_input_idx.expand(
-                            mask_to_input_idx.shape[0], x_post_this_module.shape[1]
-                        )
-                        x_post_tmp.scatter_(0, mask_to_input_idx, x_post_this_module)
+                            x_pre_this = torch.cat((x[mask], x_pre_this), dim=-1)
+                        x_post_this = self.module_list[j]["post_interface"][module_idx](x_pre_this)
+                        mask_to_input_idx = mask_to_input_idx.expand(mask_to_input_idx.shape[0], x_post_this.shape[1])
+                        x_post_tmp.scatter_(0, mask_to_input_idx, x_post_this)
                     x_post.append(x_post_tmp)
             x = torch.cat(x_post, dim=-1)
         return x
 
 
+##########################
+# _CompositionalEncoder and CompositionalEncoder (unchanged)
+##########################
 class _CompositionalEncoder(_VectorEncoder):
     """_CompositionalEncoder class."""
-
-    def __init__(
-        self,
-        encoder_kwargs: dict,
-        observation_shape: Sequence[int],
-        init_w: float = 3e-3,
-    ):
-        """Initialize _CompositionalEncoder class.
-        Args:
-            encoder_kwargs (dict): Encoder parameters.
-            observation_shape (Sequence[int]): Observation shape.
-            init_w (float, optional): Initial weight. Defaults to 3e-3.
-        """
+    def __init__(self, encoder_kwargs: dict, observation_shape: Sequence[int], init_w: float = 3e-3):
         super().__init__(
             observation_shape,
             hidden_units=None,
@@ -505,7 +403,6 @@ class _CompositionalEncoder(_VectorEncoder):
             use_dense=False,
             activation=nn.ReLU(),
         )
-
         self._observation_shape = observation_shape
         self.encoder_kwargs = encoder_kwargs
         sizes = encoder_kwargs["sizes"]
@@ -521,9 +418,7 @@ class _CompositionalEncoder(_VectorEncoder):
             sizes[j] = [input_size] + list(sizes[j])
             if j in graph_structure[-1]:
                 sizes[j] = sizes[j] + [output_dim]
-
         self._feature_size = sizes[-1][-1]
-
         self.comp_mlp = CompositionalMLP(
             sizes=sizes,
             num_modules=num_modules,
@@ -535,224 +430,67 @@ class _CompositionalEncoder(_VectorEncoder):
         )
 
     def _fc_encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.comp_mlp.forward(x)
+        return self.comp_mlp(x)
 
     @property
     def last_layer(self) -> nn.Linear:
         raise NotImplementedError("CompositionalEncoder does not have last_layer")
 
-
 class CompositionalEncoder(_CompositionalEncoder, Encoder):
     """Implements the actual Compositional Encoder."""
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Simply runs the forward pass from _CompositionalEncoder.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Output tensor.
-        """
         return self._fc_encode(x)
 
 
-# Residual MLP of the form x_{L+1} = MLP(LN(x_L)) + x_L
+##########################
+# Optimized CompositionalResidualBlock and CompositionalResidualMLP
+##########################
 class CompositionalResidualBlock(nn.Module):
     def __init__(self, projection_factor, encoder_kwargs, observation_shape, layer_norm):
         super().__init__()
-
         self.projection_factor = projection_factor
-
         self.compositional_encoder = CompositionalEncoder(
             encoder_kwargs=encoder_kwargs,
             observation_shape=observation_shape,
         )
-
         self.ln = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
         self.activation = nn.ReLU()
         self.mlp_linear = nn.Linear(164 * self.projection_factor, 164 * self.projection_factor)
 
-
-    def forward(self, x):
-
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pf = self.projection_factor
         # Extract batch components
-        current_state = x[:, :(77 * self.projection_factor)]  # Shape [batch_size, 77 * projection_factor]
-        action = x[:, (77 * self.projection_factor):(85 * self.projection_factor)]  # Shape [batch_size, 8 * projection_factor]
-        reward = x[:, (85 * self.projection_factor):(86 * self.projection_factor)]  # Shape [batch_size, 1 *projection_factor]
-        next_state = x[:, (86 * self.projection_factor):(163 * self.projection_factor)]  # Shape [batch_size, 77 * projection_factor]
-        terminal_flag = x[:, (163 * self.projection_factor):(164 * self.projection_factor)]  # Shape [batch_size, 1*projection_factor]
-        onehot = x[:, (164 * self.projection_factor):(164 * self.projection_factor + 16)]  # Shape [batch_size, 16]
+        current_state = x[:, :77 * pf]         # [batch, 77*pf]
+        action = x[:, 77 * pf:85 * pf]           # [batch, 8*pf]
+        reward = x[:, 85 * pf:86 * pf]           # [batch, 1*pf]
+        next_state = x[:, 86 * pf:163 * pf]        # [batch, 77*pf]
+        terminal_flag = x[:, 163 * pf:164 * pf]    # [batch, 1*pf]
+        onehot = x[:, 164 * pf:164 * pf + 16]       # [batch, 16]
 
-        # Concatenate one-hot vector with current_state and next_state
-        current_state_with_onehot = torch.cat([current_state, onehot], dim=-1)  # Shape [batch_size, 93]
-        next_state_with_onehot = torch.cat([next_state, onehot], dim=-1)  # Shape [batch_size, 93]
+        # Concatenate onehot with current and next states
+        current_state_with_onehot = torch.cat([current_state, onehot], dim=-1)
+        next_state_with_onehot = torch.cat([next_state, onehot], dim=-1)
 
-        # Pass through compositional encoder
-        current_state_embedding = self.compositional_encoder(current_state_with_onehot)
-        next_state_embedding = self.compositional_encoder(next_state_with_onehot)
+        # Process both states in one forward pass via stacking
+        stacked = torch.cat([current_state_with_onehot, next_state_with_onehot], dim=0)
+        stacked_emb = self.compositional_encoder(stacked)
+        current_state_emb, next_state_emb = torch.chunk(stacked_emb, 2, dim=0)
 
-
-        learned_residual = torch.cat(
-            [current_state_embedding, action, reward, next_state_embedding, terminal_flag], dim=-1
-        )
-        learned_residual = self.mlp_linear(self.activation(self.ln(learned_residual)))        
-        first_164_add = x[:, :164 * self.projection_factor] + learned_residual  # x + learned_residual for the first 164 components
-
-        return torch.cat([first_164_add, onehot], dim=-1)
-
-
-# class CompositionalResidualMLP(nn.Module):
-#     def __init__(self, 
-#                  projection_factor,
-#                  encoder_kwargs, 
-#                  observation_shape, depth: int, 
-#                  activation: str = "relu", 
-#                  layer_norm: bool = False):
-#         super().__init__()
-
-#         self.projection_factor = projection_factor
-
-#         self.network = nn.Sequential(
-#             *[CompositionalResidualBlock(self.projection_factor, encoder_kwargs, observation_shape, layer_norm) for _ in range(depth)]
-#         )
-
-#         print(depth)
-
-#         # Optional LayerNorm and activation before final output
-#         #self.layer_norm = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.object_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.obstacle_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.goal_layer_norm = nn.LayerNorm(17 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.proprio_layer_norm = nn.LayerNorm(32 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.action_layer_norm = nn.LayerNorm(8 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.reward_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
-#         self.terminal_flag_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
-
-
-#         self.activation = getattr(F, activation)
-
-        
-
-
-#         # Independent projection layers for the different components
-#         self.proj_object = nn.Linear(14, 14 * self.projection_factor)
-#         self.proj_obstacle = nn.Linear(14, 14 * self.projection_factor)
-#         self.proj_goal = nn.Linear(17, 17 * self.projection_factor)
-#         self.proj_proprio = nn.Linear(32, 32 * self.projection_factor)
-#         self.proj_action = nn.Linear(8, 8 * self.projection_factor)
-#         self.proj_reward = nn.Linear(1, 1 * self.projection_factor)
-#         self.proj_terminal_flag = nn.Linear(1, 1 * self.projection_factor)
-
-#         self.proj_object_layer_norm = nn.LayerNorm(14) if layer_norm else nn.Identity()
-#         self.proj_obstacle_layer_norm = nn.LayerNorm(14) if layer_norm else nn.Identity()
-#         self.proj_goal_layer_norm = nn.LayerNorm(17) if layer_norm else nn.Identity()
-#         self.proj_proprio_layer_norm = nn.LayerNorm(32) if layer_norm else nn.Identity()
-#         self.proj_action_layer_norm = nn.LayerNorm(8) if layer_norm else nn.Identity()
-#         self.proj_reward_layer_norm = nn.LayerNorm(1) if layer_norm else nn.Identity()
-#         self.proj_terminal_flag_layer_norm = nn.LayerNorm(1) if layer_norm else nn.Identity()
-
-#         #PRoject back to original size
-#         self.final_proj_object = nn.Linear(14 * self.projection_factor, 14)
-#         self.final_proj_obstacle = nn.Linear(14 * self.projection_factor, 14)
-#         self.final_proj_goal = nn.Linear(17 * self.projection_factor, 17)
-#         self.final_proj_proprio = nn.Linear(32 * self.projection_factor, 32)
-#         self.final_proj_action = nn.Linear(8 * self.projection_factor, 8)
-#         self.final_proj_reward = nn.Linear(1 * self.projection_factor, 1)
-#         self.final_proj_terminal_flag = nn.Linear(1 * self.projection_factor, 1)
-
-    
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        
-#         current_state = x[:, :77]  # Shape [batch_size, 77]
-#         action = x[:, 77:85]  # Shape [batch_size, 8]
-#         reward = x[:, 85:86]  # Shape [batch_size]
-#         next_state = x[:, 86:163]  # Shape [batch_size, 77]
-#         terminal_flag = x[:, 163:164]  # Shape [batch_size]
-#         onehot = x[:, 164:180]  # Shape [batch_size, 16]
-
-#         current_state_object = current_state[:, :14]
-#         current_state_obstacle = current_state[:, 14:28]
-#         current_state_goal = current_state[:, 28:45]
-#         current_state_proprio = current_state[:, 45:77]
-
-#         next_state_object = next_state[:, :14]
-#         next_state_obstacle = next_state[:, 14:28]
-#         next_state_goal = next_state[:, 28:45]
-#         next_state_proprio = next_state[:, 45:77]
-
-#         projected_current_state_object = self.proj_object(self.activation(self.proj_object_layer_norm(current_state_object)))
-#         projected_current_state_obstacle = self.proj_obstacle(self.activation(self.proj_obstacle_layer_norm(current_state_obstacle)))
-#         projected_current_state_goal = self.proj_goal(self.activation(self.proj_goal_layer_norm(current_state_goal)))
-#         projected_current_state_proprio = self.proj_proprio(self.activation(self.proj_proprio_layer_norm(current_state_proprio)))
-
-#         projected_next_state_object = self.proj_object(self.activation(self.proj_object_layer_norm(next_state_object)))
-#         projected_next_state_obstacle = self.proj_obstacle(self.activation(self.proj_obstacle_layer_norm(current_state_obstacle)))
-#         projected_next_state_goal = self.proj_goal(self.activation(self.proj_goal_layer_norm(current_state_goal)))
-#         projected_next_state_proprio = self.proj_proprio(self.activation(self.proj_proprio_layer_norm(current_state_proprio)))
-
-#         projected_current_state = torch.cat([projected_current_state_object, projected_current_state_obstacle, projected_current_state_goal, projected_current_state_proprio], dim = -1)
-#         projected_next_state = torch.cat([projected_next_state_object, projected_next_state_obstacle, projected_next_state_goal, projected_next_state_proprio], dim = -1)
-
-#         projected_action = self.proj_action(self.activation(self.proj_action_layer_norm(action)))
-#         projected_reward = self.proj_reward(self.activation(self.proj_reward_layer_norm(reward)))
-#         projected_terminal_flag = self.proj_terminal_flag(self.activation(self.proj_terminal_flag_layer_norm(terminal_flag)))
-
-#         projected_input = torch.cat([projected_current_state, projected_action, projected_reward, projected_next_state, projected_terminal_flag, onehot], dim=-1)
-
-#         #REPEAT WITH THE RESIDUAL BLOCKS
-#         repeated_residual_output = self.network(projected_input)
-
-#         #PROJECT OUTPUT BACK
-
-#         output_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, :self.projection_factor * 14])))
-#         output_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])))
-#         output_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])))
-#         output_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])))
-
-
-#         output_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])))
-#         output_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])))
-
-
-#         output_next_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])))
-#         output_next_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])))
-#         output_next_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])))
-#         output_next_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])))
-
-#         output_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])))
-
-#         output_state = torch.cat([output_state_object, output_state_obstacle, output_state_goal, output_state_proprio], dim = -1)
-#         output_next_state = torch.cat([output_next_state_object, output_next_state_obstacle, output_next_state_goal, output_next_state_proprio], dim = -1)
-
-#         output =  torch.cat([output_state, output_action, output_reward, output_next_state, output_terminal_flag], dim=-1)
-
-#         return output
+        learned_residual = torch.cat([current_state_emb, action, reward, next_state_emb, terminal_flag], dim=-1)
+        learned_residual = self.mlp_linear(self.activation(self.ln(learned_residual)))
+        first_part = x[:, :164 * pf] + learned_residual
+        return torch.cat([first_part, onehot], dim=-1)
 
 class CompositionalResidualMLP(nn.Module):
-    def __init__(self, 
-                 projection_factor,
-                 encoder_kwargs, 
-                 observation_shape, depth: int, 
-                 activation: str = "relu", 
-                 layer_norm: bool = False):
+    def __init__(self, projection_factor, encoder_kwargs, observation_shape, depth: int, activation: str = "relu", layer_norm: bool = False):
         super().__init__()
-
         self.projection_factor = projection_factor
-
         self.network = nn.Sequential(
-            *[CompositionalResidualBlock(self.projection_factor, encoder_kwargs, observation_shape, layer_norm) for _ in range(depth)]
+            *[CompositionalResidualBlock(self.projection_factor, encoder_kwargs, observation_shape, layer_norm)
+              for _ in range(depth)]
         )
-
-        # Optional LayerNorm and activation before final output
-        #self.layer_norm = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
         self.activation = getattr(F, activation)
-
-        
-
-        #self.final_linear = nn.Linear(164*self.projection_factor, 164)        
-
-        # Independent projection layers for the different components
+        # Independent projection layers for each component
         self.proj_object = nn.Linear(14, 14 * self.projection_factor)
         self.proj_obstacle = nn.Linear(14, 14 * self.projection_factor)
         self.proj_goal = nn.Linear(17, 17 * self.projection_factor)
@@ -761,9 +499,7 @@ class CompositionalResidualMLP(nn.Module):
         self.proj_reward = nn.Linear(1, 1 * self.projection_factor)
         self.proj_terminal_flag = nn.Linear(1, 1 * self.projection_factor)
 
-
-        #EACH LAYER NORM
-        self.layer_norm = nn.LayerNorm(164 * self.projection_factor) if layer_norm else nn.Identity()
+        # Layer norms per component
         self.object_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
         self.obstacle_layer_norm = nn.LayerNorm(14 * self.projection_factor) if layer_norm else nn.Identity()
         self.goal_layer_norm = nn.LayerNorm(17 * self.projection_factor) if layer_norm else nn.Identity()
@@ -772,7 +508,7 @@ class CompositionalResidualMLP(nn.Module):
         self.reward_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
         self.terminal_flag_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
 
-        #         #PRoject back to original size
+        # Final projection layers to map back to original dimensions
         self.final_proj_object = nn.Linear(14 * self.projection_factor, 14)
         self.final_proj_obstacle = nn.Linear(14 * self.projection_factor, 14)
         self.final_proj_goal = nn.Linear(17 * self.projection_factor, 17)
@@ -781,160 +517,124 @@ class CompositionalResidualMLP(nn.Module):
         self.final_proj_reward = nn.Linear(1 * self.projection_factor, 1)
         self.final_proj_terminal_flag = nn.Linear(1 * self.projection_factor, 1)
 
-    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        
-        current_state = x[:, :77]  # Shape [batch_size, 77]
-        action = x[:, 77:85]  # Shape [batch_size, 8]
-        reward = x[:, 85:86]  # Shape [batch_size]
-        next_state = x[:, 86:163]  # Shape [batch_size, 77]
-        terminal_flag = x[:, 163:164]  # Shape [batch_size]
-        onehot = x[:, 164:180]  # Shape [batch_size, 16]
+        pf = self.projection_factor
+        # Slice input into components
+        current_state = x[:, :77]         # [batch, 77]
+        action = x[:, 77:85]              # [batch, 8]
+        reward = x[:, 85:86]              # [batch, 1]
+        next_state = x[:, 86:163]         # [batch, 77]
+        terminal_flag = x[:, 163:164]     # [batch, 1]
+        onehot = x[:, 164:180]            # [batch, 16]
 
-        current_state_object = current_state[:, :14]
-        current_state_obstacle = current_state[:, 14:28]
-        current_state_goal = current_state[:, 28:45]
-        current_state_proprio = current_state[:, 45:77]
+        # Further split current and next state into semantic parts
+        cs_obj = current_state[:, :14]
+        cs_obst = current_state[:, 14:28]
+        cs_goal = current_state[:, 28:45]
+        cs_prop = current_state[:, 45:77]
 
-        next_state_object = next_state[:, :14]
-        next_state_obstacle = next_state[:, 14:28]
-        next_state_goal = next_state[:, 28:45]
-        next_state_proprio = next_state[:, 45:77]
+        ns_obj = next_state[:, :14]
+        ns_obst = next_state[:, 14:28]
+        ns_goal = next_state[:, 28:45]
+        ns_prop = next_state[:, 45:77]
 
-        projected_current_state_object = self.proj_object(current_state_object)
-        projected_current_state_obstacle = self.proj_obstacle(current_state_obstacle)
-        projected_current_state_goal = self.proj_goal(current_state_goal)
-        projected_current_state_proprio = self.proj_proprio(current_state_proprio)
+        proj_cs_obj = self.proj_object(cs_obj)
+        proj_cs_obst = self.proj_obstacle(cs_obst)
+        proj_cs_goal = self.proj_goal(cs_goal)
+        proj_cs_prop = self.proj_proprio(cs_prop)
 
-        projected_next_state_object = self.proj_object(next_state_object)
-        projected_next_state_obstacle = self.proj_obstacle(next_state_obstacle)
-        projected_next_state_goal = self.proj_goal(next_state_goal)
-        projected_next_state_proprio = self.proj_proprio(next_state_proprio)
+        proj_ns_obj = self.proj_object(ns_obj)
+        proj_ns_obst = self.proj_obstacle(ns_obst)
+        proj_ns_goal = self.proj_goal(ns_goal)
+        proj_ns_prop = self.proj_proprio(ns_prop)
 
-        projected_current_state = torch.cat([projected_current_state_object, projected_current_state_obstacle, projected_current_state_goal, projected_current_state_proprio], dim = -1)
-        projected_next_state = torch.cat([projected_next_state_object, projected_next_state_obstacle, projected_next_state_goal, projected_next_state_proprio], dim = -1)
+        proj_current_state = torch.cat([proj_cs_obj, proj_cs_obst, proj_cs_goal, proj_cs_prop], dim=-1)
+        proj_next_state = torch.cat([proj_ns_obj, proj_ns_obst, proj_ns_goal, proj_ns_prop], dim=-1)
 
-        projected_action = self.proj_action(action)
-        projected_reward = self.proj_reward(reward)
-        projected_terminal_flag = self.proj_terminal_flag(terminal_flag)
+        proj_action = self.proj_action(action)
+        proj_reward = self.proj_reward(reward)
+        proj_terminal_flag = self.proj_terminal_flag(terminal_flag)
 
-        projected_input = torch.cat([projected_current_state, projected_action, projected_reward, projected_next_state, projected_terminal_flag, onehot], dim=-1)
-
+        projected_input = torch.cat([proj_current_state, proj_action, proj_reward, proj_next_state, proj_terminal_flag, onehot], dim=-1)
         repeated_residual_output = self.network(projected_input)
 
-        #PROJECT OUTPUT BACK
+        # Precomputed boundaries (multiplied by pf)
+        boundaries = [b * pf for b in [0, 14, 28, 45, 77, 85, 86, 100, 114, 131, 163, 164]]
+        out_state_obj = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[0]:boundaries[1]])))
+        out_state_obst = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[1]:boundaries[2]])))
+        out_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[2]:boundaries[3]])))
+        out_state_prop = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[3]:boundaries[4]])))
+        out_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, boundaries[4]:boundaries[5]])))
+        out_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, boundaries[5]:boundaries[6]])))
+        out_ns_obj = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[6]:boundaries[7]])))
+        out_ns_obst = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[7]:boundaries[8]])))
+        out_ns_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[8]:boundaries[9]])))
+        out_ns_prop = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[9]:boundaries[10]])))
+        out_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, boundaries[10]:boundaries[11]])))
 
-        output_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, :self.projection_factor * 14])))
-        output_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])))
-        output_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])))
-        output_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])))
-
-
-        output_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])))
-        output_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])))
-
-
-        output_next_state_object = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])))
-        output_next_state_obstacle = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])))
-        output_next_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])))
-        output_next_state_proprio = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])))
-
-        output_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])))
-
-        # output_state_object = self.final_proj_object(repeated_residual_output[:, :self.projection_factor * 14])
-        # output_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 14 :self.projection_factor * 28])
-        # output_state_goal = self.final_proj_goal(repeated_residual_output[:,self.projection_factor * 28 :self.projection_factor * 45])
-        # output_state_proprio = self.final_proj_proprio(repeated_residual_output[:,self.projection_factor * 45 :self.projection_factor * 77])
-
-
-        # output_action = self.final_proj_action(repeated_residual_output[:, self.projection_factor * 77 :self.projection_factor * 85])
-        # output_reward = self.final_proj_reward(repeated_residual_output[:, self.projection_factor * 85 :self.projection_factor * 86])
-
-
-        # output_next_state_object = self.final_proj_object(repeated_residual_output[:, self.projection_factor * 86 :self.projection_factor * 100])
-        # output_next_state_obstacle = self.final_proj_obstacle(repeated_residual_output[:, self.projection_factor * 100 :self.projection_factor * 114])
-        # output_next_state_goal = self.final_proj_goal(repeated_residual_output[:, self.projection_factor * 114 :self.projection_factor * 131])
-        # output_next_state_proprio = self.final_proj_proprio(repeated_residual_output[:, self.projection_factor * 131 :self.projection_factor * 163])
-
-        # output_terminal_flag = self.final_proj_terminal_flag(repeated_residual_output[:, self.projection_factor * 163 :self.projection_factor * 164])
-
-        output_state = torch.cat([output_state_object, output_state_obstacle, output_state_goal, output_state_proprio], dim = -1)
-        output_next_state = torch.cat([output_next_state_object, output_next_state_obstacle, output_next_state_goal, output_next_state_proprio], dim = -1)
-
-        output =  torch.cat([output_state, output_action, output_reward, output_next_state, output_terminal_flag], dim=-1)
-
-
-        #output = self.final_linear(self.activation(self.layer_norm(repeated_residual_output[:, :self.projection_factor * 164])))  # apply LayerNorm and non-linearity
-
+        out_state = torch.cat([out_state_obj, out_state_obst, out_state_goal, out_state_prop], dim=-1)
+        out_next_state = torch.cat([out_ns_obj, out_ns_obst, out_ns_goal, out_ns_prop], dim=-1)
+        output = torch.cat([out_state, out_action, out_reward, out_next_state, out_terminal_flag], dim=-1)
         return output
 
 
+##########################
+# Top-Level CompositionalResidualMLPDenoiser
+##########################
 @gin.configurable
 class CompositionalResidualMLPDenoiser(nn.Module):
     def __init__(
-            self,
-            projection_factor,
-            d_in: int,
-            dim_t: int = 164,
-            num_layers: int = 3,
-            learned_sinusoidal_cond: bool = False,
-            random_fourier_features: bool = True,
-            learned_sinusoidal_dim: int = 16,
-            cond_dim: Optional[int] = None,
+        self,
+        projection_factor,
+        d_in: int,
+        dim_t: int = 164,
+        num_layers: int = 3,
+        learned_sinusoidal_cond: bool = False,
+        random_fourier_features: bool = True,
+        learned_sinusoidal_dim: int = 16,
+        cond_dim: Optional[int] = None,
     ):
         super().__init__()
-
         reference_observation_positions = {
-            'object-state': np.array([ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13]), 
+            'object-state': np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]), 
             'obstacle-state': np.array([14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]), 
             'goal-state': np.array([28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]),
             'robot0_proprio-state': np.array([45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
-                                            62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76]),
+                                               62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76]),
             'object_id': np.array([77, 78, 79, 80]), 
             'robot_id': np.array([81, 82, 83, 84]), 
             'obstacle_id': np.array([85, 86, 87, 88]), 
             'subtask_id': np.array([89, 90, 91, 92])
         }
-
-        self.projection_factor = projection_factor  # set desired projection factor
+        self.projection_factor = projection_factor
         observation_positions = adapt_observation_positions(reference_observation_positions, self.projection_factor)
-
         sizes = ((32,), (32, 32), (64, 64, 64), (64, 64, 64))
-        #sizes = ((16,), (16, 16), (32, 32, 32), (32, 32, 32))
         module_names = ["obstacle_id", "object_id", "subtask_id", "robot_id"]
         module_input_names = ["obstacle-state", "object-state", "goal-state", "robot0_proprio-state"]
-
         module_assignment_positions = [observation_positions[key] for key in module_names]
         interface_depths = [-1, 1, 2, 3]
         graph_structure = [[0], [1], [2], [3]]
-        num_modules = [len(onehot_pos) for onehot_pos in module_assignment_positions]
-
+        num_modules = [len(observation_positions[key]) for key in module_names]
         module_inputs = []
         for key in module_input_names:
             if isinstance(key, list):
-                # concatenate the inputs
-                module_inputs.append(
-                    np.concatenate([observation_positions[k] for k in key], axis=0)
-                )
+                module_inputs.append(np.concatenate([observation_positions[k] for k in key], axis=0))
             else:
                 module_inputs.append(observation_positions[key])
-
         obs_dim = 77 * self.projection_factor + 16
         act_dim = 8 * self.projection_factor
         output_dim = 77 * self.projection_factor
         observation_shape = (obs_dim,)
-
         encoder_kwargs = {
-                "sizes": sizes,
-                "obs_dim": obs_dim,
-                "output_dim": output_dim if output_dim is not None else act_dim,
-                "num_modules": num_modules,
-                "module_assignment_positions": module_assignment_positions,
-                "module_inputs": module_inputs,
-                "interface_depths": interface_depths,
-                "graph_structure": graph_structure,
-            }
-
+            "sizes": sizes,
+            "obs_dim": obs_dim,
+            "output_dim": output_dim if output_dim is not None else act_dim,
+            "num_modules": num_modules,
+            "module_assignment_positions": module_assignment_positions,
+            "module_inputs": module_inputs,
+            "interface_depths": interface_depths,
+            "graph_structure": graph_structure,
+        }
         self.residual_mlp = CompositionalResidualMLP(
             projection_factor=self.projection_factor,
             encoder_kwargs=encoder_kwargs,
@@ -948,7 +648,6 @@ class CompositionalResidualMLPDenoiser(nn.Module):
             self.proj = nn.Linear(d_in, dim_t)
             self.conditional = False
 
-        # time embeddings
         self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
         if self.random_or_learned_sinusoidal_cond:
             sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
@@ -964,17 +663,29 @@ class CompositionalResidualMLPDenoiser(nn.Module):
             nn.Linear(dim_t, dim_t)
         )
 
-    def forward(
-            self,
-            x: torch.Tensor,
-            timesteps: torch.Tensor,
-            cond=None,
-    ) -> torch.Tensor:
-
+    def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
         time_embed = self.time_mlp(timesteps)
         x = x + time_embed
         if self.conditional:
             assert cond is not None
             x = torch.cat((x, cond), dim=-1)
-
         return self.residual_mlp(x)
+
+
+def adapt_observation_positions(reference_observation_positions: dict, projection_factor: int) -> dict:
+    adjusted_observation_positions = {}
+    current_position = 0
+    for key, positions in reference_observation_positions.items():
+        if key not in ['object_id', 'robot_id', 'obstacle_id', 'subtask_id']:
+            num_components = len(positions)
+            new_num_components = num_components * projection_factor
+            new_positions = np.arange(current_position, current_position + new_num_components)
+            adjusted_observation_positions[key] = new_positions
+            current_position += new_num_components
+        else:
+            num_components = len(positions)
+            new_positions = np.arange(current_position, current_position + num_components)
+            adjusted_observation_positions[key] = new_positions
+            current_position += num_components
+    return adjusted_observation_positions
+

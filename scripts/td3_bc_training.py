@@ -5,9 +5,10 @@ import torch
 
 # Import necessary modules – ensure these packages are in your PYTHONPATH.
 from diffusion.utils import *
-from CORL.algorithms.offline.td3_bc import *
-from CORL.shared.buffer import *
-from CORL.shared.logger import *
+# from corl.algorithms.offline.td3_bc import *
+from corl.algorithms.td3_bc import *
+from corl.shared.buffer import *
+from corl.shared.logger import *
 import composuite
 
 def parse_args():
@@ -41,7 +42,9 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    
     args = parse_args()
+    
 
     # Create a unique results folder.
     base_results_path = pathlib.Path(args.base_results_folder)
@@ -78,6 +81,7 @@ def main():
     else:
         raise ValueError("Invalid data_type specified. Choose 'agent' or 'synthetic'.")
 
+    
     # Environment setup.
     print("Environment name:", args.robot, args.obj, args.obst, args.task)
     print("Run name:", args.synthetic_run_id)
@@ -152,7 +156,8 @@ def main():
 
     # Main training loop.
     evaluations = []
-    for t in range(int(config.max_timesteps)):
+    #for t in range(int(config.max_timesteps)):
+    for t in range(int(50000)):
         batch = replay_buffer.sample(config.batch_size)
         batch = [b.to(config.device) for b in batch]
         log_dict = trainer.train(batch)
@@ -161,7 +166,8 @@ def main():
             logger.log({'step': trainer.total_it, **log_dict}, mode='train')
 
         # Periodically evaluate the actor.
-        if t % config.eval_freq == 0 or t == config.max_timesteps - 1:
+        # if t % config.eval_freq == 0 or t == config.max_timesteps - 1:
+        if t % config.eval_freq == 0 or t == 50000 - 1:
             print(f"Time steps: {t + 1}")
             eval_scores = eval_actor(
                 env,
@@ -183,4 +189,6 @@ def main():
             logger.log({'step': trainer.total_it, "Score": eval_score}, mode='eval')
 
 if __name__ == "__main__":
+    
     main()
+    

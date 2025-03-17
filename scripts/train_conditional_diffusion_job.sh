@@ -1,13 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=diffusion_training
+#SBATCH --job-name=108diffusion_training
 #SBATCH --output=slurm/%A_%a_train_conditional_diffusion.out
-#SBATCH --mem=400G
+#SBATCH --mem=200G
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --time=168:00:00
 #SBATCH --partition=eaton-compute
 #SBATCH --qos=ee-med
-
 
 source /home/quanpham/first_3.9.6/bin/activate
 
@@ -18,6 +17,6 @@ python /home/quanpham/compositional-rl-synth-data/scripts/train_conditional_diff
     --compositional True \
     --dataset_type expert \
     --experiment_type default \
-    --num_train 224 \
+    --num_train 108 \
     --seed 42
     
