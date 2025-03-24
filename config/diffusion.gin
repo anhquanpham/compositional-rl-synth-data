@@ -11,9 +11,9 @@ construct_diffusion_model.normalizer_type = 'standard'
 construct_diffusion_model.disable_terminal_norm = True
 
 # Network.
-ResidualMLPDenoiser.dim_t = 128
-ResidualMLPDenoiser.mlp_width = 3072
-ResidualMLPDenoiser.num_layers = 3
+ResidualMLPDenoiser.dim_t = 164 #128
+ResidualMLPDenoiser.mlp_width = 2048 #3072
+ResidualMLPDenoiser.num_layers = 6
 ResidualMLPDenoiser.learned_sinusoidal_cond = False
 ResidualMLPDenoiser.random_fourier_features = True
 ResidualMLPDenoiser.learned_sinusoidal_dim = 16
@@ -22,7 +22,7 @@ ResidualMLPDenoiser.layer_norm = False
 
 # Compositional Network.
 CompositionalResidualMLPDenoiser.dim_t = 164
-CompositionalResidualMLPDenoiser.projection_factor = 16
+CompositionalResidualMLPDenoiser.projection_factor = 15
 
 # Diffusion Model.
 ElucidatedDiffusion.num_sample_steps = 128

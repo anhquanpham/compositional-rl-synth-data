@@ -116,7 +116,7 @@ class ResidualMLPDenoiser(nn.Module):
     def __init__(
         self,
         d_in: int,
-        dim_t: int = 164,
+        dim_t: int = 128,
         mlp_width: int = 1024,
         num_layers: int = 6,
         learned_sinusoidal_cond: bool = False,
@@ -135,21 +135,13 @@ class ResidualMLPDenoiser(nn.Module):
             activation=activation,
             layer_norm=layer_norm,
         )
-        # if cond_dim is not None:
-        #     self.proj = nn.Linear(d_in + cond_dim, dim_t)
-        #     self.conditional = True
-        # else:
-        #     self.proj = nn.Linear(d_in, dim_t)
-        #     self.conditional = False
-
         if cond_dim is not None:
-            #self.proj = nn.Linear(d_in + cond_dim, dim_t)
-            self.cond_proj = nn.Linear(16, dim_t)
-            self.conditional = True  # update as needed
+            self.proj = nn.Linear(d_in + cond_dim, dim_t)
+            self.conditional = True
         else:
-            #self.cond_proj = nn.Linear(d_in, dim_t)
+            self.proj = nn.Linear(d_in, dim_t)
             self.conditional = False
-        
+
         self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
         if self.random_or_learned_sinusoidal_cond:
             sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
@@ -165,26 +157,14 @@ class ResidualMLPDenoiser(nn.Module):
             nn.Linear(dim_t, dim_t)
         )
 
-    # def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
-    #     if self.conditional:
-    #         assert cond is not None
-    #         x = torch.cat((x, cond), dim=-1)
-    #     time_embed = self.time_mlp(timesteps)
-    #     x = self.proj(x) + time_embed
-    #     return self.residual_mlp(x)
-    
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
-        time_embed = self.time_mlp(timesteps)
-        x = x + time_embed
         if self.conditional:
             assert cond is not None
-            #print("COND ShAPE: ", cond.shape)
-            #################################MODIFIED TO INTEGRATE COND INTO PRESERVE THE COND INFORMATION FOR RECONSTRUCTION)
-            x = x + self.cond_proj(cond)
-            #x = torch.cat((x, cond), dim=-1)
+            x = torch.cat((x, cond), dim=-1)
+        time_embed = self.time_mlp(timesteps)
+        x = self.proj(x) + time_embed
         return self.residual_mlp(x)
-    
-    
+
 
 ##########################
 # Optimized _VectorEncoder

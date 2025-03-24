@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_training
 #SBATCH --output=slurm/%A_%a_train_conditional_diffusion.out
-#SBATCH --mem=50G
+#SBATCH --mem=100G
 #SBATCH --gpus=1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --time=96:00:00
@@ -15,7 +15,7 @@ python /home/quanpham/compositional-rl-synth-data/scripts/train_conditional_diff
     --base_data_path /mnt/kostas-graid/datasets/quanpham/full \
     --base_results_folder /home/quanpham/compositional-rl-synth-data/results/diffusion \
     --gin_config_files /home/quanpham/compositional-rl-synth-data/config/diffusion.gin \
-    --compositional True \
+    --compositional False \
     --dataset_type expert \
     --experiment_type default \
     --num_train 1 \

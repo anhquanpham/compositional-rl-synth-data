@@ -9,10 +9,6 @@ This version includes optimized versions of:
   - CompositionalResidualBlock and CompositionalResidualMLP (with additional vectorization)
 """
 
-"""
-THIS VERSION IS USING SEPARATE COMP FOR STATE AND NEXT STATE
-"""
-
 import math
 from typing import Optional, Sequence, Dict, Any
 from abc import ABCMeta, abstractmethod
@@ -116,7 +112,7 @@ class ResidualMLPDenoiser(nn.Module):
     def __init__(
         self,
         d_in: int,
-        dim_t: int = 164,
+        dim_t: int = 128,
         mlp_width: int = 1024,
         num_layers: int = 6,
         learned_sinusoidal_cond: bool = False,
@@ -135,21 +131,13 @@ class ResidualMLPDenoiser(nn.Module):
             activation=activation,
             layer_norm=layer_norm,
         )
-        # if cond_dim is not None:
-        #     self.proj = nn.Linear(d_in + cond_dim, dim_t)
-        #     self.conditional = True
-        # else:
-        #     self.proj = nn.Linear(d_in, dim_t)
-        #     self.conditional = False
-
         if cond_dim is not None:
-            #self.proj = nn.Linear(d_in + cond_dim, dim_t)
-            self.cond_proj = nn.Linear(16, dim_t)
-            self.conditional = True  # update as needed
+            self.proj = nn.Linear(d_in + cond_dim, dim_t)
+            self.conditional = True
         else:
-            #self.cond_proj = nn.Linear(d_in, dim_t)
+            self.proj = nn.Linear(d_in, dim_t)
             self.conditional = False
-        
+
         self.random_or_learned_sinusoidal_cond = learned_sinusoidal_cond or random_fourier_features
         if self.random_or_learned_sinusoidal_cond:
             sinu_pos_emb = RandomOrLearnedSinusoidalPosEmb(learned_sinusoidal_dim, random_fourier_features)
@@ -165,26 +153,14 @@ class ResidualMLPDenoiser(nn.Module):
             nn.Linear(dim_t, dim_t)
         )
 
-    # def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
-    #     if self.conditional:
-    #         assert cond is not None
-    #         x = torch.cat((x, cond), dim=-1)
-    #     time_embed = self.time_mlp(timesteps)
-    #     x = self.proj(x) + time_embed
-    #     return self.residual_mlp(x)
-    
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor, cond=None) -> torch.Tensor:
-        time_embed = self.time_mlp(timesteps)
-        x = x + time_embed
         if self.conditional:
             assert cond is not None
-            #print("COND ShAPE: ", cond.shape)
-            #################################MODIFIED TO INTEGRATE COND INTO PRESERVE THE COND INFORMATION FOR RECONSTRUCTION)
-            x = x + self.cond_proj(cond)
-            #x = torch.cat((x, cond), dim=-1)
+            x = torch.cat((x, cond), dim=-1)
+        time_embed = self.time_mlp(timesteps)
+        x = self.proj(x) + time_embed
         return self.residual_mlp(x)
-    
-    
+
 
 ##########################
 # Optimized _VectorEncoder
@@ -473,11 +449,7 @@ class CompositionalResidualBlock(nn.Module):
     def __init__(self, projection_factor, encoder_kwargs, observation_shape, layer_norm):
         super().__init__()
         self.projection_factor = projection_factor
-        self.state_compositional_encoder = CompositionalEncoder(
-            encoder_kwargs=encoder_kwargs,
-            observation_shape=observation_shape,
-        )
-        self.next_state_compositional_encoder = CompositionalEncoder(
+        self.compositional_encoder = CompositionalEncoder(
             encoder_kwargs=encoder_kwargs,
             observation_shape=observation_shape,
         )
@@ -500,14 +472,9 @@ class CompositionalResidualBlock(nn.Module):
         next_state_with_onehot = torch.cat([next_state, onehot], dim=-1)
 
         # Process both states in one forward pass via stacking
-        #stacked = torch.cat([current_state_with_onehot, next_state_with_onehot], dim=0)
-        #stacked_emb = self.compositional_encoder(stacked)
-
-        #current_state_emb, next_state_emb = torch.chunk(stacked_emb, 2, dim=0)
-
-        #TEST WITH SEPARATE FORWARD PASSES FOR STATES AND NEXT STATES
-        current_state_emb = self.state_compositional_encoder(current_state_with_onehot)
-        next_state_emb = self.next_state_compositional_encoder(next_state_with_onehot)
+        stacked = torch.cat([current_state_with_onehot, next_state_with_onehot], dim=0)
+        stacked_emb = self.compositional_encoder(stacked)
+        current_state_emb, next_state_emb = torch.chunk(stacked_emb, 2, dim=0)
 
         learned_residual = torch.cat([current_state_emb, action, reward, next_state_emb, terminal_flag], dim=-1)
         learned_residual = self.mlp_linear(self.activation(self.ln(learned_residual)))
@@ -524,18 +491,10 @@ class CompositionalResidualMLP(nn.Module):
         )
         self.activation = getattr(F, activation)
         # Independent projection layers for each component
-        self.state_proj_object = nn.Linear(14, 14 * self.projection_factor)
-        self.state_proj_obstacle = nn.Linear(14, 14 * self.projection_factor)
-        self.state_proj_goal = nn.Linear(17, 17 * self.projection_factor)
-        self.state_proj_proprio = nn.Linear(32, 32 * self.projection_factor)
-
-        # Independent projection layers for each component
-        self.next_state_proj_object = nn.Linear(14, 14 * self.projection_factor)
-        self.next_state_proj_obstacle = nn.Linear(14, 14 * self.projection_factor)
-        self.next_state_proj_goal = nn.Linear(17, 17 * self.projection_factor)
-        self.next_state_proj_proprio = nn.Linear(32, 32 * self.projection_factor)
-
-
+        self.proj_object = nn.Linear(14, 14 * self.projection_factor)
+        self.proj_obstacle = nn.Linear(14, 14 * self.projection_factor)
+        self.proj_goal = nn.Linear(17, 17 * self.projection_factor)
+        self.proj_proprio = nn.Linear(32, 32 * self.projection_factor)
         self.proj_action = nn.Linear(8, 8 * self.projection_factor)
         self.proj_reward = nn.Linear(1, 1 * self.projection_factor)
         self.proj_terminal_flag = nn.Linear(1, 1 * self.projection_factor)
@@ -550,18 +509,10 @@ class CompositionalResidualMLP(nn.Module):
         self.terminal_flag_layer_norm = nn.LayerNorm(1 * self.projection_factor) if layer_norm else nn.Identity()
 
         # Final projection layers to map back to original dimensions
-        self.state_final_proj_object = nn.Linear(14 * self.projection_factor, 14)
-        self.state_final_proj_obstacle = nn.Linear(14 * self.projection_factor, 14)
-        self.state_final_proj_goal = nn.Linear(17 * self.projection_factor, 17)
-        self.state_final_proj_proprio = nn.Linear(32 * self.projection_factor, 32)
-
-        # Final projection layers to map back to original dimensions
-        self.next_state_final_proj_object = nn.Linear(14 * self.projection_factor, 14)
-        self.next_state_final_proj_obstacle = nn.Linear(14 * self.projection_factor, 14)
-        self.next_state_final_proj_goal = nn.Linear(17 * self.projection_factor, 17)
-        self.next_state_final_proj_proprio = nn.Linear(32 * self.projection_factor, 32)
-        
-        
+        self.final_proj_object = nn.Linear(14 * self.projection_factor, 14)
+        self.final_proj_obstacle = nn.Linear(14 * self.projection_factor, 14)
+        self.final_proj_goal = nn.Linear(17 * self.projection_factor, 17)
+        self.final_proj_proprio = nn.Linear(32 * self.projection_factor, 32)
         self.final_proj_action = nn.Linear(8 * self.projection_factor, 8)
         self.final_proj_reward = nn.Linear(1 * self.projection_factor, 1)
         self.final_proj_terminal_flag = nn.Linear(1 * self.projection_factor, 1)
@@ -587,15 +538,15 @@ class CompositionalResidualMLP(nn.Module):
         ns_goal = next_state[:, 28:45]
         ns_prop = next_state[:, 45:77]
 
-        proj_cs_obj = self.state_proj_object(cs_obj)
-        proj_cs_obst = self.state_proj_obstacle(cs_obst)
-        proj_cs_goal = self.state_proj_goal(cs_goal)
-        proj_cs_prop = self.state_proj_proprio(cs_prop)
+        proj_cs_obj = self.proj_object(cs_obj)
+        proj_cs_obst = self.proj_obstacle(cs_obst)
+        proj_cs_goal = self.proj_goal(cs_goal)
+        proj_cs_prop = self.proj_proprio(cs_prop)
 
-        proj_ns_obj = self.next_state_proj_object(ns_obj)
-        proj_ns_obst = self.next_state_proj_obstacle(ns_obst)
-        proj_ns_goal = self.next_state_proj_goal(ns_goal)
-        proj_ns_prop = self.next_state_proj_proprio(ns_prop)
+        proj_ns_obj = self.proj_object(ns_obj)
+        proj_ns_obst = self.proj_obstacle(ns_obst)
+        proj_ns_goal = self.proj_goal(ns_goal)
+        proj_ns_prop = self.proj_proprio(ns_prop)
 
         proj_current_state = torch.cat([proj_cs_obj, proj_cs_obst, proj_cs_goal, proj_cs_prop], dim=-1)
         proj_next_state = torch.cat([proj_ns_obj, proj_ns_obst, proj_ns_goal, proj_ns_prop], dim=-1)
@@ -609,16 +560,16 @@ class CompositionalResidualMLP(nn.Module):
 
         # Precomputed boundaries (multiplied by pf)
         boundaries = [b * pf for b in [0, 14, 28, 45, 77, 85, 86, 100, 114, 131, 163, 164]]
-        out_state_obj = self.state_final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[0]:boundaries[1]])))
-        out_state_obst = self.state_final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[1]:boundaries[2]])))
-        out_state_goal = self.state_final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[2]:boundaries[3]])))
-        out_state_prop = self.state_final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[3]:boundaries[4]])))
+        out_state_obj = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[0]:boundaries[1]])))
+        out_state_obst = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[1]:boundaries[2]])))
+        out_state_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[2]:boundaries[3]])))
+        out_state_prop = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[3]:boundaries[4]])))
         out_action = self.final_proj_action(self.activation(self.action_layer_norm(repeated_residual_output[:, boundaries[4]:boundaries[5]])))
         out_reward = self.final_proj_reward(self.activation(self.reward_layer_norm(repeated_residual_output[:, boundaries[5]:boundaries[6]])))
-        out_ns_obj = self.next_state_final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[6]:boundaries[7]])))
-        out_ns_obst = self.next_state_final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[7]:boundaries[8]])))
-        out_ns_goal = self.next_state_final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[8]:boundaries[9]])))
-        out_ns_prop = self.next_state_final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[9]:boundaries[10]])))
+        out_ns_obj = self.final_proj_object(self.activation(self.object_layer_norm(repeated_residual_output[:, boundaries[6]:boundaries[7]])))
+        out_ns_obst = self.final_proj_obstacle(self.activation(self.obstacle_layer_norm(repeated_residual_output[:, boundaries[7]:boundaries[8]])))
+        out_ns_goal = self.final_proj_goal(self.activation(self.goal_layer_norm(repeated_residual_output[:, boundaries[8]:boundaries[9]])))
+        out_ns_prop = self.final_proj_proprio(self.activation(self.proprio_layer_norm(repeated_residual_output[:, boundaries[9]:boundaries[10]])))
         out_terminal_flag = self.final_proj_terminal_flag(self.activation(self.terminal_flag_layer_norm(repeated_residual_output[:, boundaries[10]:boundaries[11]])))
 
         out_state = torch.cat([out_state_obj, out_state_obst, out_state_goal, out_state_prop], dim=-1)
